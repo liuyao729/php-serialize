@@ -36,6 +36,10 @@
 #
 # See http://www.php.net/serialize and http://www.php.net/unserialize for
 # details on the PHP side of all this.
+
+# Adds serialization for Rails objects e.g. Flashes
+require 'railtie' if defined? Rails
+
 module PHP
 # string = PHP.serialize(mixed var[, bool assoc])
 #
@@ -75,8 +79,9 @@ module PHP
 				s << '}'
 
 			when Struct
+				n = to_php_serializable_name(var)
 				# encode as Object with same name
-				s << "O:#{var.class.to_s.length}:\"#{var.class.to_s.downcase}\":#{var.members.length}:{"
+				s << "O:#{n.length}:\"#{n}\":#{var.members.length}:{"
 				var.members.each do |member|
 					s << "#{PHP.serialize(member, assoc)}#{PHP.serialize(var[member], assoc)}"
 				end
@@ -99,9 +104,10 @@ module PHP
 
 			else
 				if var.respond_to?(:to_assoc)
+					n = to_php_serializable_name(var)
 					v = var.to_assoc
 					# encode as Object with same name
-					s << "O:#{var.class.to_s.length}:\"#{var.class.to_s.downcase}\":#{v.length}:{"
+					s << "O:#{n.length}:\"#{n}\":#{v.length}:{"
 					v.each do |k,v|
 						s << "#{PHP.serialize(k.to_s, assoc)}#{PHP.serialize(v, assoc)}"
 					end
@@ -145,7 +151,7 @@ module PHP
 		s
 	end # }}}
 
-# mixed = PHP.unserialize(string serialized, [hash classmap, [bool assoc]])
+# mixed = PHP.unserialize(string serialized, [bool assoc])
 #
 # Returns an object containing the reconstituted data from serialized.
 #
@@ -155,13 +161,8 @@ module PHP
 # Note: this will lose ordering.  To avoid this, specify assoc=true,
 # and it will be unserialized as an associative array: [[key,value],...]
 #
-# If a serialized object is encountered, the hash 'classmap' is searched for
-# the class name (as a symbol).  Since PHP classnames are not case-preserving,
-# this *must* be a .capitalize()d representation.  The value is expected
-# to be the class itself; i.e. something you could call .new on.
-#
-# If it's not found in 'classmap', the current constant namespace is searched,
-# and failing that, a new Struct(classname) is generated, with the arguments
+# If it's not found in the current constant namespace,
+# a new Struct(classname) is generated, with the arguments
 # for .new specified in the same order PHP provided; since PHP uses hashes
 # to represent attributes, this should be the same order they're specified
 # in PHP, but this is untested.
@@ -173,17 +174,10 @@ module PHP
 # be returned identically (i.e. foo == PHP.unserialize(PHP.serialize(foo))
 # for these types); Struct should be too, provided it's in the namespace
 # Module.const_get within unserialize() can see, or you gave it the same
-# name in the Struct.new(<structname>), otherwise you should provide it in
-# classmap.
+# name in the Struct.new(<structname>).
 #
 # Note: StringIO is required for unserialize(); it's loaded as needed
-	def PHP.unserialize(string, classmap = nil, assoc = false) # {{{
-		if classmap == true or classmap == false
-			assoc = classmap
-			classmap = {}
-		end
-		classmap ||= {}
-
+	def PHP.unserialize(string, assoc = false) # {{{
 		require 'stringio'
 		string = StringIO.new(string)
 		def string.read_until(char)
@@ -199,19 +193,19 @@ module PHP
 			loop do
 				if string.string[string.pos, 32] =~ /^([\w\.]+)\|/
 					string.pos += $&.size
-					ret[$1] = PHP.do_unserialize(string, classmap, assoc)
+					ret[$1] = PHP.do_unserialize(string, assoc)
 				else
 					break
 				end
 			end
 			ret
 		else
-			PHP.do_unserialize(string, classmap, assoc)
+			PHP.do_unserialize(string, assoc)
 		end
 	end
 
 private
-	def PHP.do_unserialize(string, classmap, assoc)
+	def PHP.do_unserialize(string, assoc)
 		val = nil
 		# determine a type
 		type = string.read(2)[0,1]
@@ -220,7 +214,7 @@ private
 				count = string.read_until('{').to_i
 				val = vals = Array.new
 				count.times do |i|
-					vals << [do_unserialize(string, classmap, assoc), do_unserialize(string, classmap, assoc)]
+					vals << [do_unserialize(string, assoc), do_unserialize(string, assoc)]
 				end
 				string.read(1) # skip the ending }
 
@@ -254,38 +248,31 @@ private
 			when 'O' # object, O:length:"class":length:{[attribute][value]...}
 				# class name (lowercase in PHP, grr)
 				len = string.read_until(':').to_i + 3 # quotes, seperator
-				klass = string.read(len)[1...-2].capitalize.intern # read it, kill useless quotes
+				klass = string.read(len)[1...-2].intern # read it, kill useless quotes
 
 				# read the attributes
 				attrs = []
 				len = string.read_until('{').to_i
 
 				len.times do
-					attr = (do_unserialize(string, classmap, assoc))
-					attrs << [attr.intern, (attr << '=').intern, do_unserialize(string, classmap, assoc)]
+					attrs << [do_unserialize(string, assoc), do_unserialize(string, assoc)]
 				end
 				string.read(1)
 
 				val = nil
-				# See if we need to map to a particular object
-				if classmap.has_key?(klass)
-					val = classmap[klass].new
-				elsif Struct.const_defined?(klass) # Nope; see if there's a Struct
-					classmap[klass] = val = Struct.const_get(klass)
+				begin
+					val = from_php_serializable_name(klass).new
+				rescue NameError # Nope; make a new Struct
+					val = Struct.new(klass.to_s.capitalize, *attrs.collect { |v| v[0].to_s })
 					val = val.new
-				else # Nope; see if there's a Constant
-					begin
-						classmap[klass] = val = Module.const_get(klass)
-
-						val = val.new
-					rescue NameError # Nope; make a new Struct
-						classmap[klass] = val = Struct.new(klass.to_s, *attrs.collect { |v| v[0].to_s })
-						val = val.new
-					end
 				end
 
-				attrs.each do |attr,attrassign,v|
-					val.__send__(attrassign, v)
+				if val.respond_to?(:from_assoc)
+					val.from_assoc(attrs)
+				else
+					attrs.each do |attr,v|
+						val.__send__("#{attr}=", v)
+					end
 				end
 
 			when 's' # string, s:length:"data";
@@ -310,5 +297,38 @@ private
 
 		val
 	end # }}}
+
+	# Takes value of type TestModule::TestObject and returns string 'test_module__test_object'
+	def self.to_php_serializable_name(value)
+		value.class.name.gsub('::', '__').gsub(/([a-z\d])([A-Z])/,'\1_\2').downcase
+	end
+
+	# Takes string 'test_module__test_object' and returns constant TestModule::TestObject
+	def self.from_php_serializable_name(name)
+		constantize(camelize(name.to_s.gsub('__', '/')))
+	end
+
+	# Tries to find a constant with the name specified in the argument string:
+	# (based on same from ActiveSupport)
+	def self.constantize(camel_cased_word)
+		names = camel_cased_word.to_s.split('::')
+		names.shift if names.empty? || names.first.empty?
+
+		constant = Object
+		names.each do |name|
+			constant = constant.const_defined?(name) ? constant.const_get(name) : constant.const_missing(name)
+		end
+		constant
+	end
+
+	# Converts strings to UpperCamelCase
+	# (based on same from ActiveSupport)
+	def self.camelize(term, uppercase_first_letter = true)
+		string = term.to_s
+		if uppercase_first_letter
+			string = string.sub(/^[a-z\d]*/) { $&.capitalize }
+		end
+		string.gsub(/(?:_|(\/))([a-z\d]*)/i) { "#{$1}#{$2.capitalize}" }.gsub('/', '::')
+	end
 end
 

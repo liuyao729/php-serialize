@@ -30,11 +30,6 @@ class TestClass
 	end
 end
 
-ClassMap = {
-	TestStruct.name.capitalize.intern => TestStruct,
-	TestClass.name.capitalize.intern => TestClass
-}
-
 class TestPhpSerialize < Test::Unit::TestCase
 	def self.test(ruby, php, opts = {})
 		if opts[:name]
@@ -48,7 +43,7 @@ class TestPhpSerialize < Test::Unit::TestCase
 				serialized = PHP.serialize(ruby)
 				assert_equal php, serialized
 
-				unserialized = PHP.unserialize(serialized, ClassMap)
+				unserialized = PHP.unserialize(serialized)
 				case ruby
 				when Symbol
 					assert_equal ruby.to_s, unserialized
@@ -73,9 +68,9 @@ class TestPhpSerialize < Test::Unit::TestCase
 	test [nil, true, false, 42, 4.2, 'test'], 'a:6:{i:0;N;i:1;b:1;i:2;b:0;i:3;i:42;i:4;d:4.2;i:5;s:4:"test";}',
 		:name => 'Array'
 	test({'foo' => 'bar', 4 => [5,4,3,2]}, 'a:2:{s:3:"foo";s:3:"bar";i:4;a:4:{i:0;i:5;i:1;i:4;i:2;i:3;i:3;i:2;}}', :name => 'Hash')
-	test TestStruct.new("Foo", 65), 'O:10:"teststruct":2:{s:4:"name";s:3:"Foo";s:5:"value";i:65;}',
+	test TestStruct.new("Foo", 65), 'O:11:"test_struct":2:{s:4:"name";s:3:"Foo";s:5:"value";i:65;}',
 		:name => 'Struct'
-	test TestClass.new("Foo", 65), 'O:9:"testclass":2:{s:4:"name";s:3:"Foo";s:5:"value";i:65;}',
+	test TestClass.new("Foo", 65), 'O:10:"test_class":2:{s:4:"name";s:3:"Foo";s:5:"value";i:65;}',
 		:name => 'Class'
 
   # PHP counts multibyte string, not string length
@@ -119,6 +114,39 @@ class TestPhpSerialize < Test::Unit::TestCase
       unserialized = PHP.unserialize(phps)
     end
   end
+
+	module TestModule
+		class TestObject
+			def initialize
+				@hash = {}
+			end
+
+			def value
+				@hash['key']
+			end
+
+			def value=(value)
+				@hash['key'] = value
+			end
+
+			def to_assoc
+				@hash.to_a
+			end
+
+			def from_assoc(assoc)
+				@hash = Hash[*assoc.flatten]
+			end
+		end
+	end
+
+	def test_ruby_object
+		ruby = TestModule::TestObject.new
+		ruby.value = 'Test'
+		serialized = PHP.serialize(ruby)
+		unserialized = PHP.unserialize(serialized)
+		assert_equal ruby.class.name, unserialized.class.name
+		assert_equal ruby.value, unserialized.value
+	end
 end
 
 require 'test/unit/ui/console/testrunner'
